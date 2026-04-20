@@ -16,7 +16,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 load_dotenv()
 
 # Версия бота
-BOT_VERSION = "1.0.2"
+BOT_VERSION = "1.0.3"
 
 # Настройка логирования
 logging.basicConfig(
@@ -41,7 +41,7 @@ if not all([TOKEN, AUTHORIZED_USER, BYBIT_API_KEY, BYBIT_API_SECRET]):
     logger.error("❌ Отсутствуют переменные окружения!")
     raise ValueError("Проверьте .env файл")
 
-# Bybit API endpoints
+# Bybit API endpoints (правильные для testnet)
 BYBIT_REST_URL = "https://api-testnet.bybit.com"
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -58,7 +58,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
     
     def log_message(self, format, *args):
-        # Подавляем логи HTTP сервера
         pass
 
 def run_http_server():
@@ -80,40 +79,43 @@ def is_authorized(update: Update) -> bool:
     
     return authorized
 
-def generate_bybit_signature(params, secret):
-    """Генерация подписи для Bybit API"""
-    param_str = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
-    signature = hmac.new(
-        bytes(secret, 'utf-8'),
-        bytes(param_str, 'utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-    return signature
-
 def get_bybit_balance():
-    """Получение баланса через Bybit API"""
+    """Получение баланса через Bybit API v5"""
     try:
         logger.info("🔄 Запрос баланса Bybit testnet...")
         
         timestamp = int(time.time() * 1000)
-        params = {
-            'api_key': BYBIT_API_KEY,
-            'timestamp': timestamp,
+        
+        # Для Bybit API v5 нужен другой формат подписи
+        param_str = f"{timestamp}{BYBIT_API_KEY}{timestamp}5000"
+        signature = hmac.new(
+            bytes(BYBIT_API_SECRET, 'utf-8'),
+            bytes(param_str, 'utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        headers = {
+            'X-BAPI-API-KEY': BYBIT_API_KEY,
+            'X-BAPI-TIMESTAMP': str(timestamp),
+            'X-BAPI-SIGN': signature,
+            'X-BAPI-RECV-WINDOW': '5000',
+            'Content-Type': 'application/json'
         }
         
-        params['sign'] = generate_bybit_signature(params, BYBIT_API_SECRET)
-        
-        headers = {'Content-Type': 'application/json'}
-        
+        # Правильный endpoint для получения баланса
         response = requests.get(
             f"{BYBIT_REST_URL}/v5/account/wallet-balance",
-            params=params,
+            params={"accountType": "UNIFIED"},
             headers=headers,
             timeout=10
         )
         
+        logger.info(f"Response status: {response.status_code}")
+        
         if response.status_code == 200:
             data = response.json()
+            logger.info(f"API Response: {json.dumps(data, indent=2)}")
+            
             if data['retCode'] == 0:
                 logger.info("✅ Баланс успешно получен")
                 return data
@@ -121,7 +123,7 @@ def get_bybit_balance():
                 logger.error(f"❌ Ошибка API: {data['retMsg']}")
                 return None
         else:
-            logger.error(f"❌ HTTP ошибка: {response.status_code}")
+            logger.error(f"❌ HTTP ошибка: {response.status_code}, {response.text}")
             return None
             
     except Exception as e:
@@ -132,33 +134,48 @@ def format_balance_message(balance_data):
     """Форматирование баланса"""
     try:
         if not balance_data or balance_data.get('retCode') != 0:
-            return "❌ Не удалось получить баланс"
+            return "❌ Не удалось получить баланс. Проверьте API ключи."
         
         result = balance_data.get('result', {})
-        wallet_balance = result.get('list', [{}])[0].get('coin', [])
+        
+        # Пробуем разные форматы ответа
+        if 'list' in result:
+            wallet_balance = result.get('list', [{}])[0].get('coin', [])
+        elif 'balances' in result:
+            wallet_balance = result.get('balances', [])
+        else:
+            wallet_balance = []
         
         if not wallet_balance:
-            return "💼 Баланс пуст"
+            return "💼 Баланс пуст или не найден"
         
         balance_lines = ["💼 <b>Ваш баланс на Bybit Testnet:</b>\n"]
         total_usdt = 0
         
         for coin in wallet_balance:
             coin_name = coin.get('coin', '')
-            wallet = coin.get('walletBalance', '0')
+            # Пробуем разные поля для баланса
+            wallet = coin.get('walletBalance', coin.get('free', coin.get('balance', '0')))
             
-            if float(wallet) > 0:
-                balance_lines.append(f"• <b>{coin_name}:</b> {float(wallet):.8f}")
-                if coin_name == 'USDT':
-                    total_usdt += float(wallet)
+            try:
+                amount = float(wallet)
+                if amount > 0:
+                    balance_lines.append(f"• <b>{coin_name}:</b> {amount:.8f}")
+                    if coin_name == 'USDT':
+                        total_usdt += amount
+            except:
+                continue
         
         if total_usdt > 0:
             balance_lines.append(f"\n💰 <b>Общий баланс (USDT):</b> {total_usdt:.2f}")
         
+        if len(balance_lines) == 1:
+            return "💼 Нет монет с ненулевым балансом"
+        
         return "\n".join(balance_lines)
         
     except Exception as e:
-        logger.error(f"❌ Ошибка форматирования: {e}")
+        logger.error(f"❌ Ошибка форматирования: {e}", exc_info=True)
         return "❌ Ошибка обработки баланса"
 
 def start(update: Update, context: CallbackContext):
@@ -249,12 +266,21 @@ def main():
     logger.info(f"🚀 Запуск бота версии {BOT_VERSION}")
     logger.info(f"👤 Авторизован: {AUTHORIZED_USER}")
     
+    # Удаляем webhook перед запуском
+    try:
+        import requests as req
+        webhook_url = f"https://api.telegram.org/bot{TOKEN}/deleteWebhook"
+        response = req.get(webhook_url)
+        logger.info(f"Webhook deleted: {response.json()}")
+    except Exception as e:
+        logger.error(f"Error deleting webhook: {e}")
+    
     # Запускаем HTTP сервер в отдельном потоке
     http_thread = threading.Thread(target=run_http_server, daemon=True)
     http_thread.start()
     
     try:
-        # Создаем Updater
+        # Создаем Updater с увеличенным таймаутом
         updater = Updater(token=TOKEN, use_context=True)
         dispatcher = updater.dispatcher
         
@@ -265,7 +291,7 @@ def main():
         dispatcher.add_handler(CommandHandler("help", start))
         dispatcher.add_error_handler(error_handler)
         
-        # Запускаем бота
+        # Запускаем бота с clean=True
         updater.start_polling(timeout=30, clean=True)
         logger.info("✅ Бот запущен и готов к работе!")
         
