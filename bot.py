@@ -13,7 +13,7 @@ from telegram.ext import Updater, CommandHandler, CallbackContext
 # Загружаем переменные
 load_dotenv()
 
-BOT_VERSION = "1.0.13"
+BOT_VERSION = "1.0.14"
 
 # Настройка логирования
 logging.basicConfig(
@@ -83,6 +83,9 @@ def get_bybit_balance():
         
         if response.status_code == 200:
             data = response.json()
+            # Логируем полный ответ для отладки
+            logger.info(f"API Response: {json.dumps(data, indent=2)}")
+            
             if data.get('retCode') == 0:
                 logger.info("✅ Баланс получен")
                 return data
@@ -90,7 +93,7 @@ def get_bybit_balance():
                 logger.error(f"API error: {data.get('retMsg')}")
                 return None
         else:
-            logger.error(f"HTTP error: {response.status_code}")
+            logger.error(f"HTTP error: {response.status_code}, {response.text}")
             return None
             
     except Exception as e:
@@ -98,7 +101,7 @@ def get_bybit_balance():
         return None
 
 def format_balance(balance_data):
-    """Форматирование баланса"""
+    """Форматирование баланса - универсальный парсер"""
     try:
         if not balance_data or balance_data.get('retCode') != 0:
             return "❌ Не удалось получить баланс"
@@ -107,32 +110,63 @@ def format_balance(balance_data):
         accounts = result.get('list', [])
         
         if not accounts:
-            return "💼 Баланс пуст"
-        
-        account = accounts[0]
-        coins = account.get('coin', [])
-        
-        if not coins:
-            return "💼 Нет монет"
+            # Пробуем альтернативную структуру
+            if 'balances' in result:
+                accounts = [{'coin': result['balances']}]
+            else:
+                return "💼 Баланс пуст (нет данных)"
         
         text = "💼 <b>Баланс на Bybit Testnet:</b>\n\n"
         has_balance = False
         
-        for coin in coins:
-            coin_name = coin.get('coin', '')
-            wallet_balance = float(coin.get('walletBalance', 0))
+        # Проходим по всем аккаунтам (обычно один)
+        for account in accounts:
+            # Ищем список монет в разных возможных полях
+            coins = account.get('coin', [])
+            if not coins and 'balances' in account:
+                coins = account['balances']
+            if not coins and 'assets' in account:
+                coins = account['assets']
             
-            if wallet_balance > 0:
-                has_balance = True
-                text += f"• <b>{coin_name}:</b> {wallet_balance:.8f}\n"
+            if not coins:
+                continue
+            
+            for coin in coins:
+                # Название монеты
+                coin_name = coin.get('coin', '')
+                if not coin_name:
+                    coin_name = coin.get('currency', '')
+                if not coin_name:
+                    continue
+                
+                # Пробуем разные поля для баланса
+                balance = None
+                for field in ['walletBalance', 'balance', 'free', 'available', 'amount', 'total']:
+                    if field in coin:
+                        try:
+                            balance = float(coin[field])
+                            break
+                        except:
+                            pass
+                
+                if balance is None:
+                    continue
+                
+                if balance > 0:
+                    has_balance = True
+                    # Форматируем число (убираем лишние нули)
+                    if balance >= 1:
+                        text += f"• <b>{coin_name}:</b> {balance:,.2f}\n"
+                    else:
+                        text += f"• <b>{coin_name}:</b> {balance:.8f}\n"
         
         if not has_balance:
-            text = "💼 Нет монет с ненулевым балансом"
+            text = "💼 Нет монет с ненулевым балансом\n\nВозможно, API вернул данные в другом формате. Проверьте логи."
         
         return text
         
     except Exception as e:
-        logger.error(f"Format error: {e}")
+        logger.error(f"Format error: {e}", exc_info=True)
         return "❌ Ошибка форматирования баланса"
 
 def start(update: Update, context: CallbackContext):
@@ -210,7 +244,7 @@ def main():
     except Exception as e:
         logger.error(f"Ошибка удаления webhook: {e}")
     
-    # Запускаем бота (используем drop_pending_updates вместо clean)
+    # Запускаем бота
     updater = Updater(token=TOKEN, use_context=True)
     dp = updater.dispatcher
     
@@ -219,7 +253,6 @@ def main():
     dp.add_handler(CommandHandler("version", version))
     dp.add_handler(CommandHandler("help", start))
     
-    # Используем drop_pending_updates вместо clean
     updater.start_polling(drop_pending_updates=True)
     logger.info("✅ Бот запущен и готов к работе!")
     
