@@ -1,0 +1,21 @@
+напиши код телеграмм бота на питона, бота буду запускать на сайте bothost.ru
+вот мои переменные
+TELEGRAM_BOT_TOKEN=8585640704:AAEyOt0MA5JW6mbhR5azfkEehY1ridfd98k
+AUTHORIZED_USER=@bosdima
+
+# ДЕМО ключи (с testnet.bybit.com)
+BYBIT_API_KEY_DEMO=XUUEiKR82IM1fGzfer
+BYBIT_API_SECRET_DEMO=3iLOEpVq1hUFTGyyvvoIrQqx8PQnYe7KYFriv
+
+при запуске обязательно показывает версию бота, если я делаю корроктировку бота то версия меняется, что бы мне не перепутать с какой версией бота я работаю
+
+код должен подключится к бирже тестовой сети https://testnet.bybit.com/ и показать какой баланс монет 
+
+руковорство по API https://testnet.bybit.com/ru-RU/help-center/topic-list/api
+
+включи подробное логирование что бы понять если что не работает, для обработки ошибок
+
+укажи какие нужно переменные в файле .env
+и что нужно указать в файле requirements.txt
+
+
