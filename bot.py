@@ -1,311 +1,129 @@
 import os
 import logging
-import json
 import time
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
 from telegram import Update, ParseMode, Bot
-from telegram.ext import Dispatcher, CommandHandler, CallbackContext
-from queue import Queue
+from telegram.ext import Updater, CommandHandler, CallbackContext
 
 # Загружаем переменные окружения
 load_dotenv()
 
-# Версия бота
-BOT_VERSION = "1.0.5"
+BOT_VERSION = "1.0.6"
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Получаем переменные
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 AUTHORIZED_USER = os.getenv('AUTHORIZED_USER')
 BYBIT_API_KEY = os.getenv('BYBIT_API_KEY_DEMO')
 BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET_DEMO')
 
-# Проверка переменных
 if not all([TOKEN, AUTHORIZED_USER, BYBIT_API_KEY, BYBIT_API_SECRET]):
     logger.error("❌ Отсутствуют переменные окружения!")
     raise ValueError("Проверьте .env файл")
 
-# Создаем бота и диспетчер
-bot = Bot(token=TOKEN)
-update_queue = Queue()
-dispatcher = Dispatcher(bot, update_queue, use_context=True)
-
 def is_authorized(update: Update) -> bool:
-    """Проверка авторизации"""
     user_id = f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id)
-    authorized = user_id == AUTHORIZED_USER or str(update.effective_user.id) == AUTHORIZED_USER.replace('@', '')
-    
-    if not authorized:
-        logger.warning(f"⛔ Неавторизованный доступ от {user_id}")
-    
-    return authorized
+    return user_id == AUTHORIZED_USER or str(update.effective_user.id) == AUTHORIZED_USER.replace('@', '')
 
 def get_bybit_balance():
-    """Получение баланса через API Bybit"""
     try:
-        import hashlib
-        import hmac
-        
-        logger.info("🔄 Запрос баланса Bybit testnet...")
+        import hashlib, hmac
         
         timestamp = int(time.time() * 1000)
-        recv_window = '5000'
-        
-        # Параметры для подписи
-        param_str = f"{timestamp}{BYBIT_API_KEY}{recv_window}"
-        
-        # Создаем подпись
+        param_str = f"{timestamp}{BYBIT_API_KEY}5000"
         signature = hmac.new(
             bytes(BYBIT_API_SECRET, 'utf-8'),
             bytes(param_str, 'utf-8'),
             hashlib.sha256
         ).hexdigest()
         
-        # Заголовки
         headers = {
             'X-BAPI-API-KEY': BYBIT_API_KEY,
             'X-BAPI-TIMESTAMP': str(timestamp),
             'X-BAPI-SIGN': signature,
-            'X-BAPI-RECV-WINDOW': recv_window,
-            'Content-Type': 'application/json'
+            'X-BAPI-RECV-WINDOW': '5000',
         }
         
-        # Запрос к API
-        url = "https://api-testnet.bybit.com/v5/account/wallet-balance"
-        params = {"accountType": "UNIFIED"}
-        
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        
-        logger.info(f"Response status: {response.status_code}")
+        response = requests.get(
+            "https://api-testnet.bybit.com/v5/account/wallet-balance",
+            headers=headers,
+            params={"accountType": "UNIFIED"},
+            timeout=10
+        )
         
         if response.status_code == 200:
-            data = response.json()
-            if data.get('retCode') == 0:
-                logger.info("✅ Баланс успешно получен")
-                return data
-            else:
-                logger.error(f"❌ Ошибка API: {data.get('retMsg')}")
-                return None
-        else:
-            logger.error(f"❌ HTTP ошибка: {response.status_code}, {response.text}")
-            return None
-            
+            return response.json()
+        return None
     except Exception as e:
-        logger.error(f"❌ Ошибка получения баланса: {e}", exc_info=True)
+        logger.error(f"Ошибка: {e}")
         return None
 
-def format_balance_message(balance_data):
-    """Форматирование баланса"""
-    try:
-        if not balance_data or balance_data.get('retCode') != 0:
-            return "❌ Не удалось получить баланс.\n\nВозможные причины:\n1. Неправильные API ключи\n2. Ключи созданы не на testnet\n3. У ключей нет прав на чтение"
-        
-        result = balance_data.get('result', {})
-        balances = result.get('list', [{}])[0].get('coin', [])
-        
-        if not balances:
-            return "💼 Баланс пуст (нет монет)"
-        
-        balance_lines = ["💼 <b>Баланс на Bybit Testnet:</b>\n"]
-        total_usdt = 0
-        
-        for coin in balances:
-            coin_name = coin.get('coin', '')
-            wallet_balance = float(coin.get('walletBalance', 0))
-            
-            if wallet_balance > 0:
-                balance_lines.append(f"• <b>{coin_name}:</b> {wallet_balance:.8f}")
-                if coin_name == 'USDT':
-                    total_usdt += wallet_balance
-        
-        if total_usdt > 0:
-            balance_lines.append(f"\n💰 <b>Общий баланс:</b> {total_usdt:.2f} USDT")
-        
-        if len(balance_lines) == 1:
-            return "💼 Нет монет с ненулевым балансом"
-        
-        return "\n".join(balance_lines)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка форматирования: {e}")
-        return "❌ Ошибка обработки баланса"
-
-# Обработчики команд
 def start(update: Update, context: CallbackContext):
-    """Команда /start"""
-    try:
-        logger.info(f"📱 /start от @{update.effective_user.username}")
-        
-        if not is_authorized(update):
-            update.message.reply_text("⛔ У вас нет доступа!")
-            return
-        
-        welcome_text = f"""
-🤖 <b>Бот Bybit Testnet</b>
-📦 <b>Версия:</b> {BOT_VERSION}
-✅ <b>Статус:</b> Активен
-🔗 <b>Биржа:</b> Bybit Testnet
-👤 <b>Авторизован:</b> {AUTHORIZED_USER}
+    if not is_authorized(update):
+        update.message.reply_text("⛔ Нет доступа!")
+        return
+    
+    update.message.reply_text(f"""
+🤖 Бот Bybit Testnet
+📦 Версия: {BOT_VERSION}
+✅ Статус: Активен
+👤 Авторизован: {AUTHORIZED_USER}
 
-🔄 /balance - показать баланс
-ℹ️ /version - версия бота
-        """
-        
-        update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Приветствие отправлено")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка /start: {e}")
+/balance - баланс
+/version - версия
+    """)
 
 def balance(update: Update, context: CallbackContext):
-    """Команда /balance"""
-    try:
-        logger.info(f"💰 /balance от @{update.effective_user.username}")
-        
-        if not is_authorized(update):
-            update.message.reply_text("⛔ Нет доступа!")
-            return
-        
-        update.message.reply_text("🔄 Получение баланса...")
-        
-        balance_data = get_bybit_balance()
-        balance_text = format_balance_message(balance_data)
-        
-        balance_text += f"\n\n📦 <b>Версия бота:</b> {BOT_VERSION}"
-        balance_text += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
-        update.message.reply_text(balance_text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Баланс отправлен")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка /balance: {e}")
-        update.message.reply_text("⚠️ Ошибка получения баланса")
+    if not is_authorized(update):
+        update.message.reply_text("⛔ Нет доступа!")
+        return
+    
+    update.message.reply_text("🔄 Получение баланса...")
+    data = get_bybit_balance()
+    
+    if not data or data.get('retCode') != 0:
+        update.message.reply_text("❌ Ошибка получения баланса")
+        return
+    
+    balances = data.get('result', {}).get('list', [{}])[0].get('coin', [])
+    if not balances:
+        update.message.reply_text("💼 Баланс пуст")
+        return
+    
+    text = "💼 Баланс:\n"
+    for coin in balances:
+        amount = float(coin.get('walletBalance', 0))
+        if amount > 0:
+            text += f"• {coin.get('coin')}: {amount:.8f}\n"
+    
+    update.message.reply_text(text)
 
 def version(update: Update, context: CallbackContext):
-    """Команда /version"""
-    try:
-        logger.info(f"ℹ️ /version от @{update.effective_user.username}")
-        
-        if not is_authorized(update):
-            update.message.reply_text("⛔ Нет доступа!")
-            return
-        
-        version_text = f"""
-📦 <b>Информация о боте:</b>
+    if not is_authorized(update):
+        update.message.reply_text("⛔ Нет доступа!")
+        return
+    
+    update.message.reply_text(f"📦 Версия: {BOT_VERSION}")
 
-• <b>Версия:</b> {BOT_VERSION}
-• <b>Биржа:</b> Bybit Testnet
-• <b>Автор:</b> {AUTHORIZED_USER}
-• <b>Статус:</b> ✅ Работает
-• <b>Время:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        """
-        
-        update.message.reply_text(version_text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Версия отправлена")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка /version: {e}")
-
-def unknown(update: Update, context: CallbackContext):
-    """Неизвестные команды"""
-    logger.info(f"❓ Неизвестная команда: {update.message.text}")
-    update.message.reply_text("❓ Используйте /start, /balance или /version")
-
-# Регистрируем обработчики
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("balance", balance))
-dispatcher.add_handler(CommandHandler("version", version))
-dispatcher.add_handler(CommandHandler("help", start))
-
-# Flask приложение
-app = Flask(__name__)
-
-@app.route(f'/webhook/{TOKEN}', methods=['POST'])
-def webhook():
-    """Webhook для получения обновлений от Telegram"""
-    try:
-        json_str = request.get_data().decode('UTF-8')
-        update = Update.de_json(json_str, bot)
-        dispatcher.process_update(update)
-        return jsonify({'status': 'ok'}), 200
-    except Exception as e:
-        logger.error(f"Ошибка webhook: {e}")
-        return jsonify({'status': 'error'}), 500
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check для хостинга"""
-    return jsonify({
-        'status': 'running',
-        'version': BOT_VERSION,
-        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }), 200
-
-@app.route('/', methods=['GET'])
-def index():
-    """Главная страница"""
-    return f"🤖 Bot is running! Version: {BOT_VERSION}", 200
-
-def set_webhook():
-    """Установка webhook для бота"""
-    try:
-        # Получаем URL приложения
-        # На bothost.ru используем их домен
-        host = request.host if hasattr(request, 'host') else os.getenv('HOST', 'localhost')
-        webhook_url = f"https://{host}/webhook/{TOKEN}"
-        
-        # Удаляем старый webhook
-        delete_response = requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
-        logger.info(f"Delete webhook: {delete_response.json()}")
-        
-        # Устанавливаем новый webhook
-        response = requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-            json={'url': webhook_url}
-        )
-        
-        if response.json().get('ok'):
-            logger.info(f"✅ Webhook установлен на {webhook_url}")
-        else:
-            logger.error(f"❌ Ошибка установки webhook: {response.json()}")
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка установки webhook: {e}")
+def main():
+    logger.info(f"🚀 Запуск бота v{BOT_VERSION}")
+    
+    # Удаляем webhook
+    requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
+    
+    updater = Updater(token=TOKEN, use_context=True)
+    dp = updater.dispatcher
+    
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("balance", balance))
+    dp.add_handler(CommandHandler("version", version))
+    
+    updater.start_polling()
+    logger.info("✅ Бот запущен!")
+    updater.idle()
 
 if __name__ == '__main__':
-    logger.info(f"🚀 Запуск бота версии {BOT_VERSION}")
-    logger.info(f"👤 Авторизован: {AUTHORIZED_USER}")
-    logger.info(f"🔑 API Key: {BYBIT_API_KEY[:10]}...")
-    
-    port = int(os.getenv('PORT', 3000))
-    
-    # Устанавливаем webhook в отдельном потоке после запуска сервера
-    with app.app_context():
-        # Получаем URL
-        webhook_url = f"https://{os.getenv('HOST', 'localhost')}/webhook/{TOKEN}"
-        
-        # Удаляем старый webhook
-        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
-        
-        # Устанавливаем новый webhook
-        response = requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-            json={'url': webhook_url}
-        )
-        
-        if response.json().get('ok'):
-            logger.info(f"✅ Webhook установлен на {webhook_url}")
-        else:
-            logger.error(f"❌ Ошибка webhook: {response.json()}")
-    
-    logger.info(f"🌐 Запуск сервера на порту {port}")
-    app.run(host='0.0.0.0', port=port)
+    main()
