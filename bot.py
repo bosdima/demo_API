@@ -2,16 +2,18 @@ import os
 import logging
 import time
 import requests
+import hashlib
+import hmac
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackContext
-from pybit.unified_trading import HTTP
 
 # Загружаем переменные
 load_dotenv()
 
-BOT_VERSION = "1.0.11"
+BOT_VERSION = "1.0.13"
 
 # Настройка логирования
 logging.basicConfig(
@@ -36,34 +38,70 @@ def is_authorized(update: Update) -> bool:
     return user_id == AUTHORIZED_USER or str(update.effective_user.id) == AUTHORIZED_USER.replace('@', '')
 
 def get_bybit_balance():
-    """Получение баланса через официальную библиотеку pybit"""
+    """Получение баланса с Bybit testnet"""
     try:
         logger.info("🔄 Запрос баланса...")
         
-        session = HTTP(
-            testnet=True,
-            api_key=BYBIT_API_KEY,
-            api_secret=BYBIT_API_SECRET,
-        )
+        timestamp = int(time.time() * 1000)
         
-        response = session.get_wallet_balance(accountType="UNIFIED")
+        # Параметры запроса
+        params = {
+            "accountType": "UNIFIED"
+        }
         
-        if response.get('retCode') == 0:
-            logger.info("✅ Баланс получен")
-            return response
+        # Сортируем параметры
+        sorted_params = sorted(params.items())
+        
+        # Создаем строку запроса
+        query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
+        
+        recv_window = "5000"
+        
+        # Формируем строку для подписи
+        param_str = f"{timestamp}{BYBIT_API_KEY}{recv_window}{query_string}"
+        
+        # Создаем подпись
+        signature = hmac.new(
+            BYBIT_API_SECRET.encode('utf-8'),
+            param_str.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Заголовки
+        headers = {
+            'X-BAPI-API-KEY': BYBIT_API_KEY,
+            'X-BAPI-TIMESTAMP': str(timestamp),
+            'X-BAPI-SIGN': signature,
+            'X-BAPI-RECV-WINDOW': recv_window,
+            'Content-Type': 'application/json'
+        }
+        
+        # URL с параметрами
+        url = f"https://api-testnet.bybit.com/v5/account/wallet-balance?{query_string}"
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('retCode') == 0:
+                logger.info("✅ Баланс получен")
+                return data
+            else:
+                logger.error(f"API error: {data.get('retMsg')}")
+                return None
         else:
-            logger.error(f"API error: {response.get('retMsg')}")
+            logger.error(f"HTTP error: {response.status_code}")
             return None
             
     except Exception as e:
-        logger.error(f"Ошибка: {e}", exc_info=True)
+        logger.error(f"Error: {e}", exc_info=True)
         return None
 
 def format_balance(balance_data):
     """Форматирование баланса"""
     try:
         if not balance_data or balance_data.get('retCode') != 0:
-            return "❌ Не удалось получить баланс.\n\nПроверьте API ключи на testnet.bybit.com"
+            return "❌ Не удалось получить баланс"
         
         result = balance_data.get('result', {})
         accounts = result.get('list', [])
@@ -162,25 +200,27 @@ def main():
     """Запуск бота"""
     logger.info(f"🚀 Запуск бота v{BOT_VERSION}")
     logger.info(f"👤 Авторизован: {AUTHORIZED_USER}")
-    logger.info(f"🔑 API Key: {BYBIT_API_KEY[:10]}...")
+    logger.info(f"🔑 API Key: {BYBIT_API_KEY[:15]}...")
     
     # Удаляем webhook
     try:
-        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
-        logger.info("✅ Webhook удален")
+        response = requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
+        logger.info(f"Webhook удален: {response.json()}")
         time.sleep(1)
     except Exception as e:
         logger.error(f"Ошибка удаления webhook: {e}")
     
-    # Запускаем бота
+    # Запускаем бота (используем drop_pending_updates вместо clean)
     updater = Updater(token=TOKEN, use_context=True)
     dp = updater.dispatcher
     
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("balance", balance))
     dp.add_handler(CommandHandler("version", version))
+    dp.add_handler(CommandHandler("help", start))
     
-    updater.start_polling(clean=True)
+    # Используем drop_pending_updates вместо clean
+    updater.start_polling(drop_pending_updates=True)
     logger.info("✅ Бот запущен и готов к работе!")
     
     updater.idle()
