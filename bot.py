@@ -2,17 +2,16 @@ import os
 import logging
 import time
 import requests
-import hashlib
-import hmac
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackContext
+from pybit.unified_trading import HTTP
 
 # Загружаем переменные
 load_dotenv()
 
-BOT_VERSION = "1.0.10"
+BOT_VERSION = "1.0.11"
 
 # Настройка логирования
 logging.basicConfig(
@@ -37,69 +36,34 @@ def is_authorized(update: Update) -> bool:
     return user_id == AUTHORIZED_USER or str(update.effective_user.id) == AUTHORIZED_USER.replace('@', '')
 
 def get_bybit_balance():
-    """Получение баланса с Bybit testnet"""
+    """Получение баланса через официальную библиотеку pybit"""
     try:
         logger.info("🔄 Запрос баланса...")
         
-        timestamp = int(time.time() * 1000)
+        session = HTTP(
+            testnet=True,
+            api_key=BYBIT_API_KEY,
+            api_secret=BYBIT_API_SECRET,
+        )
         
-        # Параметры запроса
-        params = {
-            "accountType": "UNIFIED"
-        }
+        response = session.get_wallet_balance(accountType="UNIFIED")
         
-        # Сортируем параметры и создаем строку запроса
-        query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-        
-        # Строка для подписи
-        param_str = f"{timestamp}{BYBIT_API_KEY}{query_string}"
-        
-        logger.info(f"Строка для подписи: {param_str[:50]}...")
-        
-        # Создаем подпись
-        signature = hmac.new(
-            BYBIT_API_SECRET.encode('utf-8'),
-            param_str.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
-        # Заголовки
-        headers = {
-            'X-BAPI-API-KEY': BYBIT_API_KEY,
-            'X-BAPI-TIMESTAMP': str(timestamp),
-            'X-BAPI-SIGN': signature,
-            'X-BAPI-RECV-WINDOW': '5000',
-            'Content-Type': 'application/json'
-        }
-        
-        # URL
-        url = f"https://api-testnet.bybit.com/v5/account/wallet-balance?{query_string}"
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        logger.info(f"Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('retCode') == 0:
-                logger.info("✅ Баланс получен")
-                return data
-            else:
-                logger.error(f"API error: {data.get('retMsg')}")
-                return None
+        if response.get('retCode') == 0:
+            logger.info("✅ Баланс получен")
+            return response
         else:
-            logger.error(f"HTTP error: {response.status_code}")
+            logger.error(f"API error: {response.get('retMsg')}")
             return None
             
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.error(f"Ошибка: {e}", exc_info=True)
         return None
 
 def format_balance(balance_data):
     """Форматирование баланса"""
     try:
         if not balance_data or balance_data.get('retCode') != 0:
-            return "❌ Не удалось получить баланс. Проверьте API ключи."
+            return "❌ Не удалось получить баланс.\n\nПроверьте API ключи на testnet.bybit.com"
         
         result = balance_data.get('result', {})
         accounts = result.get('list', [])
@@ -151,7 +115,7 @@ def start(update: Update, context: CallbackContext):
 /version - версия бота
         """
         update.message.reply_text(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Приветствие отправлено {update.effective_user.username}")
+        logger.info(f"✅ Приветствие отправлено")
     except Exception as e:
         logger.error(f"Ошибка /start: {e}")
 
@@ -171,7 +135,7 @@ def balance(update: Update, context: CallbackContext):
         text += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         update.message.reply_text(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Баланс отправлен {update.effective_user.username}")
+        logger.info(f"✅ Баланс отправлен")
     except Exception as e:
         logger.error(f"Ошибка /balance: {e}")
         update.message.reply_text("⚠️ Ошибка получения баланса")
@@ -190,7 +154,7 @@ def version(update: Update, context: CallbackContext):
 🕐 <b>Время:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         """
         update.message.reply_text(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Версия отправлена {update.effective_user.username}")
+        logger.info(f"✅ Версия отправлена")
     except Exception as e:
         logger.error(f"Ошибка /version: {e}")
 
@@ -200,29 +164,25 @@ def main():
     logger.info(f"👤 Авторизован: {AUTHORIZED_USER}")
     logger.info(f"🔑 API Key: {BYBIT_API_KEY[:10]}...")
     
-    # Принудительно удаляем webhook
+    # Удаляем webhook
     try:
-        response = requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
-        logger.info(f"Webhook удален: {response.json()}")
+        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
+        logger.info("✅ Webhook удален")
         time.sleep(1)
     except Exception as e:
         logger.error(f"Ошибка удаления webhook: {e}")
     
-    # Создаем updater
+    # Запускаем бота
     updater = Updater(token=TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
+    dp = updater.dispatcher
     
-    # Регистрируем команды
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("balance", balance))
-    dispatcher.add_handler(CommandHandler("version", version))
-    dispatcher.add_handler(CommandHandler("help", start))
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("balance", balance))
+    dp.add_handler(CommandHandler("version", version))
     
-    # Запускаем polling - используем только clean=True
     updater.start_polling(clean=True)
     logger.info("✅ Бот запущен и готов к работе!")
     
-    # Останавливаем бота при сигнале
     updater.idle()
 
 if __name__ == '__main__':
@@ -231,4 +191,4 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
     except Exception as e:
-        logger.error(f"💥 Критическая ошибка: {e}", exc_info=True)
+        logger.error(f"💥 Ошибка: {e}", exc_info=True)
