@@ -5,16 +5,18 @@ import hashlib
 import hmac
 import time
 import requests
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackContext
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Загружаем переменные окружения
 load_dotenv()
 
 # Версия бота
-BOT_VERSION = "1.0.1"
+BOT_VERSION = "1.0.2"
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,14 +34,41 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 AUTHORIZED_USER = os.getenv('AUTHORIZED_USER')
 BYBIT_API_KEY = os.getenv('BYBIT_API_KEY_DEMO')
 BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET_DEMO')
+PORT = int(os.getenv('PORT', 8080))
 
 # Проверка переменных
 if not all([TOKEN, AUTHORIZED_USER, BYBIT_API_KEY, BYBIT_API_SECRET]):
     logger.error("❌ Отсутствуют переменные окружения!")
     raise ValueError("Проверьте .env файл")
 
-# Bybit API endpoints (testnet)
+# Bybit API endpoints
 BYBIT_REST_URL = "https://api-testnet.bybit.com"
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Простой HTTP сервер для health checks"""
+    
+    def do_GET(self):
+        if self.path == '/health' or self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(f"Bot is running! Version: {BOT_VERSION}".encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Подавляем логи HTTP сервера
+        pass
+
+def run_http_server():
+    """Запуск HTTP сервера для health checks"""
+    try:
+        server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
+        logger.info(f"🌐 HTTP сервер запущен на порту {PORT}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"❌ Ошибка HTTP сервера: {e}")
 
 def is_authorized(update: Update) -> bool:
     """Проверка авторизации"""
@@ -66,25 +95,21 @@ def get_bybit_balance():
     try:
         logger.info("🔄 Запрос баланса Bybit testnet...")
         
-        # Параметры запроса
         timestamp = int(time.time() * 1000)
         params = {
             'api_key': BYBIT_API_KEY,
             'timestamp': timestamp,
         }
         
-        # Генерация подписи
         params['sign'] = generate_bybit_signature(params, BYBIT_API_SECRET)
         
-        # Запрос к API
-        headers = {
-            'Content-Type': 'application/json'
-        }
+        headers = {'Content-Type': 'application/json'}
         
         response = requests.get(
             f"{BYBIT_REST_URL}/v5/account/wallet-balance",
             params=params,
-            headers=headers
+            headers=headers,
+            timeout=10
         )
         
         if response.status_code == 200:
@@ -104,12 +129,11 @@ def get_bybit_balance():
         return None
 
 def format_balance_message(balance_data):
-    """Форматирование баланса для сообщения"""
+    """Форматирование баланса"""
     try:
         if not balance_data or balance_data.get('retCode') != 0:
             return "❌ Не удалось получить баланс"
         
-        # Парсим баланс
         result = balance_data.get('result', {})
         wallet_balance = result.get('list', [{}])[0].get('coin', [])
         
@@ -177,7 +201,6 @@ def balance(update: Update, context: CallbackContext):
         balance_data = get_bybit_balance()
         balance_text = format_balance_message(balance_data)
         
-        # Добавляем версию и время
         balance_text += f"\n\n📦 <b>Версия бота:</b> {BOT_VERSION}"
         balance_text += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
@@ -217,26 +240,46 @@ def unknown(update: Update, context: CallbackContext):
     logger.info(f"❓ Неизвестная команда: {update.message.text}")
     update.message.reply_text("❓ Используйте /start, /balance или /version")
 
+def error_handler(update, context):
+    """Обработчик ошибок"""
+    logger.error(f"❌ Ошибка: {context.error}")
+
 def main():
     """Запуск бота"""
     logger.info(f"🚀 Запуск бота версии {BOT_VERSION}")
     logger.info(f"👤 Авторизован: {AUTHORIZED_USER}")
     
-    updater = Updater(token=TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
+    # Запускаем HTTP сервер в отдельном потоке
+    http_thread = threading.Thread(target=run_http_server, daemon=True)
+    http_thread.start()
     
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("balance", balance))
-    dispatcher.add_handler(CommandHandler("version", version))
-    dispatcher.add_handler(CommandHandler("help", start))
-    
-    updater.start_polling()
-    logger.info("✅ Бот запущен и готов к работе!")
-    
-    updater.idle()
+    try:
+        # Создаем Updater
+        updater = Updater(token=TOKEN, use_context=True)
+        dispatcher = updater.dispatcher
+        
+        # Регистрируем обработчики
+        dispatcher.add_handler(CommandHandler("start", start))
+        dispatcher.add_handler(CommandHandler("balance", balance))
+        dispatcher.add_handler(CommandHandler("version", version))
+        dispatcher.add_handler(CommandHandler("help", start))
+        dispatcher.add_error_handler(error_handler)
+        
+        # Запускаем бота
+        updater.start_polling(timeout=30, clean=True)
+        logger.info("✅ Бот запущен и готов к работе!")
+        
+        # Останавливаем бота при сигнале
+        updater.idle()
+        
+    except Exception as e:
+        logger.error(f"💥 Критическая ошибка: {e}", exc_info=True)
+        raise
 
 if __name__ == '__main__':
     try:
         main()
+    except KeyboardInterrupt:
+        logger.info("👋 Бот остановлен вручную")
     except Exception as e:
-        logger.error(f"💥 Критическая ошибка: {e}", exc_info=True)
+        logger.error(f"💥 Фатальная ошибка: {e}", exc_info=True)
