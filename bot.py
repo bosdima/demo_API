@@ -10,173 +10,117 @@ from dotenv import load_dotenv
 from telegram import Update, ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
-# Загружаем переменные
 load_dotenv()
 
-BOT_VERSION = "1.0.14"
+BOT_VERSION = "1.0.15"
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Получаем переменные
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 AUTHORIZED_USER = os.getenv('AUTHORIZED_USER')
 BYBIT_API_KEY = os.getenv('BYBIT_API_KEY_DEMO')
 BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET_DEMO')
 
-if not all([TOKEN, AUTHORIZED_USER, BYBIT_API_KEY, BYBIT_API_SECRET]):
-    logger.error("❌ Отсутствуют переменные окружения!")
-    raise ValueError("Проверьте .env файл")
-
 def is_authorized(update: Update) -> bool:
-    """Проверка авторизации"""
     user_id = f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id)
     return user_id == AUTHORIZED_USER or str(update.effective_user.id) == AUTHORIZED_USER.replace('@', '')
 
 def get_bybit_balance():
-    """Получение баланса с Bybit testnet"""
+    """Получение баланса - пробуем разные типы аккаунтов"""
     try:
         logger.info("🔄 Запрос баланса...")
-        
         timestamp = int(time.time() * 1000)
         
-        # Параметры запроса
-        params = {
-            "accountType": "UNIFIED"
-        }
+        # Пробуем разные типы аккаунтов
+        account_types = ["UNIFIED", "SPOT", "FUND", "DERIVATIVES"]
         
-        # Сортируем параметры
-        sorted_params = sorted(params.items())
-        
-        # Создаем строку запроса
-        query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
-        
-        recv_window = "5000"
-        
-        # Формируем строку для подписи
-        param_str = f"{timestamp}{BYBIT_API_KEY}{recv_window}{query_string}"
-        
-        # Создаем подпись
-        signature = hmac.new(
-            BYBIT_API_SECRET.encode('utf-8'),
-            param_str.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
-        # Заголовки
-        headers = {
-            'X-BAPI-API-KEY': BYBIT_API_KEY,
-            'X-BAPI-TIMESTAMP': str(timestamp),
-            'X-BAPI-SIGN': signature,
-            'X-BAPI-RECV-WINDOW': recv_window,
-            'Content-Type': 'application/json'
-        }
-        
-        # URL с параметрами
-        url = f"https://api-testnet.bybit.com/v5/account/wallet-balance?{query_string}"
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            # Логируем полный ответ для отладки
-            logger.info(f"API Response: {json.dumps(data, indent=2)}")
+        for acc_type in account_types:
+            params = {"accountType": acc_type}
+            query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+            recv_window = "5000"
+            param_str = f"{timestamp}{BYBIT_API_KEY}{recv_window}{query_string}"
             
-            if data.get('retCode') == 0:
-                logger.info("✅ Баланс получен")
-                return data
-            else:
-                logger.error(f"API error: {data.get('retMsg')}")
-                return None
-        else:
-            logger.error(f"HTTP error: {response.status_code}, {response.text}")
-            return None
+            signature = hmac.new(
+                BYBIT_API_SECRET.encode('utf-8'),
+                param_str.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            headers = {
+                'X-BAPI-API-KEY': BYBIT_API_KEY,
+                'X-BAPI-TIMESTAMP': str(timestamp),
+                'X-BAPI-SIGN': signature,
+                'X-BAPI-RECV-WINDOW': recv_window,
+            }
+            
+            url = f"https://api-testnet.bybit.com/v5/account/wallet-balance?{query_string}"
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('retCode') == 0:
+                    coins = data.get('result', {}).get('list', [{}])[0].get('coin', [])
+                    if coins:
+                        logger.info(f"✅ Баланс найден в accountType: {acc_type}")
+                        logger.info(f"Найдено монет: {len(coins)}")
+                        return data
+                    else:
+                        logger.info(f"Тип {acc_type}: монет не найдено")
+                else:
+                    logger.error(f"API error for {acc_type}: {data.get('retMsg')}")
+        
+        logger.error("Не удалось получить баланс ни с одним типом аккаунта")
+        return None
             
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         return None
 
 def format_balance(balance_data):
-    """Форматирование баланса - универсальный парсер"""
+    """Форматирование баланса"""
     try:
         if not balance_data or balance_data.get('retCode') != 0:
             return "❌ Не удалось получить баланс"
         
-        result = balance_data.get('result', {})
-        accounts = result.get('list', [])
-        
+        accounts = balance_data.get('result', {}).get('list', [])
         if not accounts:
-            # Пробуем альтернативную структуру
-            if 'balances' in result:
-                accounts = [{'coin': result['balances']}]
-            else:
-                return "💼 Баланс пуст (нет данных)"
+            return "💼 Баланс пуст"
         
         text = "💼 <b>Баланс на Bybit Testnet:</b>\n\n"
         has_balance = False
         
-        # Проходим по всем аккаунтам (обычно один)
         for account in accounts:
-            # Ищем список монет в разных возможных полях
             coins = account.get('coin', [])
-            if not coins and 'balances' in account:
-                coins = account['balances']
-            if not coins and 'assets' in account:
-                coins = account['assets']
-            
-            if not coins:
-                continue
-            
             for coin in coins:
-                # Название монеты
                 coin_name = coin.get('coin', '')
-                if not coin_name:
-                    coin_name = coin.get('currency', '')
-                if not coin_name:
-                    continue
+                wallet_balance = float(coin.get('walletBalance', 0))
                 
-                # Пробуем разные поля для баланса
-                balance = None
-                for field in ['walletBalance', 'balance', 'free', 'available', 'amount', 'total']:
-                    if field in coin:
-                        try:
-                            balance = float(coin[field])
-                            break
-                        except:
-                            pass
-                
-                if balance is None:
-                    continue
-                
-                if balance > 0:
+                if wallet_balance > 0:
                     has_balance = True
-                    # Форматируем число (убираем лишние нули)
-                    if balance >= 1:
-                        text += f"• <b>{coin_name}:</b> {balance:,.2f}\n"
+                    if wallet_balance >= 1:
+                        text += f"• <b>{coin_name}:</b> {wallet_balance:,.2f}\n"
                     else:
-                        text += f"• <b>{coin_name}:</b> {balance:.8f}\n"
+                        text += f"• <b>{coin_name}:</b> {wallet_balance:.8f}\n"
         
         if not has_balance:
-            text = "💼 Нет монет с ненулевым балансом\n\nВозможно, API вернул данные в другом формате. Проверьте логи."
+            text = "💼 Нет монет с ненулевым балансом\n\nПроверьте что:\n1. API ключ создан на testnet.bybit.com\n2. У ключа есть права Read-Wallet и Read-Spot\n3. На демо-счете есть средства"
         
         return text
         
     except Exception as e:
-        logger.error(f"Format error: {e}", exc_info=True)
+        logger.error(f"Format error: {e}")
         return "❌ Ошибка форматирования баланса"
 
 def start(update: Update, context: CallbackContext):
-    """Команда /start"""
-    try:
-        if not is_authorized(update):
-            update.message.reply_text("⛔ У вас нет доступа!")
-            return
-        
-        text = f"""
+    if not is_authorized(update):
+        update.message.reply_text("⛔ У вас нет доступа!")
+        return
+    
+    text = f"""
 🤖 <b>Бот Bybit Testnet</b>
 📦 <b>Версия:</b> {BOT_VERSION}
 ✅ <b>Статус:</b> Активен
@@ -185,73 +129,53 @@ def start(update: Update, context: CallbackContext):
 <b>Доступные команды:</b>
 /balance - показать баланс
 /version - версия бота
-        """
-        update.message.reply_text(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Приветствие отправлено")
-    except Exception as e:
-        logger.error(f"Ошибка /start: {e}")
+    """
+    update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 def balance(update: Update, context: CallbackContext):
-    """Команда /balance"""
-    try:
-        if not is_authorized(update):
-            update.message.reply_text("⛔ Нет доступа!")
-            return
-        
-        update.message.reply_text("🔄 Получение баланса...")
-        
-        data = get_bybit_balance()
-        text = format_balance(data)
-        
-        text += f"\n\n📦 <b>Версия:</b> {BOT_VERSION}"
-        text += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
-        update.message.reply_text(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Баланс отправлен")
-    except Exception as e:
-        logger.error(f"Ошибка /balance: {e}")
-        update.message.reply_text("⚠️ Ошибка получения баланса")
+    if not is_authorized(update):
+        update.message.reply_text("⛔ Нет доступа!")
+        return
+    
+    update.message.reply_text("🔄 Получение баланса...")
+    
+    data = get_bybit_balance()
+    text = format_balance(data)
+    
+    text += f"\n\n📦 <b>Версия:</b> {BOT_VERSION}"
+    text += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 def version(update: Update, context: CallbackContext):
-    """Команда /version"""
-    try:
-        if not is_authorized(update):
-            update.message.reply_text("⛔ Нет доступа!")
-            return
-        
-        text = f"""
+    if not is_authorized(update):
+        update.message.reply_text("⛔ Нет доступа!")
+        return
+    
+    text = f"""
 📦 <b>Версия бота:</b> {BOT_VERSION}
 ✅ <b>Статус:</b> Работает
 👤 <b>Автор:</b> {AUTHORIZED_USER}
 🕐 <b>Время:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        """
-        update.message.reply_text(text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Версия отправлена")
-    except Exception as e:
-        logger.error(f"Ошибка /version: {e}")
+    """
+    update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 def main():
-    """Запуск бота"""
     logger.info(f"🚀 Запуск бота v{BOT_VERSION}")
     logger.info(f"👤 Авторизован: {AUTHORIZED_USER}")
-    logger.info(f"🔑 API Key: {BYBIT_API_KEY[:15]}...")
     
-    # Удаляем webhook
     try:
-        response = requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
-        logger.info(f"Webhook удален: {response.json()}")
+        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
         time.sleep(1)
     except Exception as e:
         logger.error(f"Ошибка удаления webhook: {e}")
     
-    # Запускаем бота
     updater = Updater(token=TOKEN, use_context=True)
     dp = updater.dispatcher
     
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("balance", balance))
     dp.add_handler(CommandHandler("version", version))
-    dp.add_handler(CommandHandler("help", start))
     
     updater.start_polling(drop_pending_updates=True)
     logger.info("✅ Бот запущен и готов к работе!")
@@ -261,7 +185,5 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except KeyboardInterrupt:
-        logger.info("👋 Бот остановлен")
     except Exception as e:
-        logger.error(f"💥 Ошибка: {e}", exc_info=True)
+        logger.error(f"💥 Ошибка: {e}")
