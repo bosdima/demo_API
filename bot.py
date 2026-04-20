@@ -1,246 +1,244 @@
 import os
 import logging
-from dotenv import load_dotenv
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, ContextTypes
-from pybit.unified_trading import HTTP
-import asyncio
 from datetime import datetime
+from dotenv import load_dotenv
+from telegram import Update, ParseMode
+from telegram.ext import Updater, CommandHandler, CallbackContext
+import ccxt
 
-# Загрузка переменных окружения
+# Загружаем переменные окружения
 load_dotenv()
+
+# Версия бота (меняй при каждом обновлении)
+BOT_VERSION = "1.0.0"
 
 # Настройка подробного логирования
 logging.basicConfig(
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG
+    handlers=[
+        logging.FileHandler('bot_debug.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# Получение переменных из окружения
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# Получаем переменные
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 AUTHORIZED_USER = os.getenv('AUTHORIZED_USER')
-BYBIT_API_KEY_DEMO = os.getenv('BYBIT_API_KEY_DEMO')
-BYBIT_API_SECRET_DEMO = os.getenv('BYBIT_API_SECRET_DEMO')
+BYBIT_API_KEY = os.getenv('BYBIT_API_KEY_DEMO')
+BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET_DEMO')
 
 # Проверка наличия необходимых переменных
-if not all([TELEGRAM_BOT_TOKEN, AUTHORIZED_USER, BYBIT_API_KEY_DEMO, BYBIT_API_SECRET_DEMO]):
-    logger.error("❌ Ошибка: Не все переменные окружения установлены!")
-    logger.error(f"TELEGRAM_BOT_TOKEN: {'✅' if TELEGRAM_BOT_TOKEN else '❌'}")
-    logger.error(f"AUTHORIZED_USER: {'✅' if AUTHORIZED_USER else '❌'}")
-    logger.error(f"BYBIT_API_KEY_DEMO: {'✅' if BYBIT_API_KEY_DEMO else '❌'}")
-    logger.error(f"BYBIT_API_SECRET_DEMO: {'✅' if BYBIT_API_SECRET_DEMO else '❌'}")
-    exit(1)
+if not all([TOKEN, AUTHORIZED_USER, BYBIT_API_KEY, BYBIT_API_SECRET]):
+    logger.error("❌ Отсутствуют необходимые переменные окружения!")
+    raise ValueError("Проверьте .env файл")
 
-logger.info("✅ Все переменные окружения загружены успешно")
-
-# Инициализация клиента Bybit (тестовая сеть)
-try:
-    session = HTTP(
-        testnet=True,
-        api_key=BYBIT_API_KEY_DEMO,
-        api_secret=BYBIT_API_SECRET_DEMO,
-    )
-    logger.info("✅ Клиент Bybit успешно инициализирован (testnet)")
-except Exception as e:
-    logger.error(f"❌ Ошибка инициализации клиента Bybit: {e}")
-    exit(1)
-
-# Функция проверки авторизации пользователя
-async def is_authorized(update: Update) -> bool:
-    user_username = update.effective_user.username
-    if not user_username:
-        logger.warning(f"Пользователь {update.effective_user.id} не имеет username")
-        return False
+# Функция для проверки авторизации
+def is_authorized(update: Update) -> bool:
+    """Проверка авторизации пользователя"""
+    user_id = f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id)
+    authorized = user_id == AUTHORIZED_USER or str(update.effective_user.id) == AUTHORIZED_USER.replace('@', '')
     
-    authorized = f"@{user_username}" == AUTHORIZED_USER
     if not authorized:
-        logger.warning(f"Неавторизованная попытка доступа от пользователя @{user_username}")
-    else:
-        logger.info(f"Авторизован пользователь @{user_username}")
+        logger.warning(f"⛔ Неавторизованный доступ от {user_id}")
+    
     return authorized
 
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Получена команда /start от пользователя {update.effective_user.id}")
-    
-    if not await is_authorized(update):
-        await update.message.reply_text("❌ У вас нет доступа к этому боту.")
-        return
-    
-    await update.message.reply_text(
-        "🤖 Бот для проверки баланса на Bybit Testnet\n\n"
-        "Доступные команды:\n"
-        "/balance - показать баланс всех монет\n"
-        "/balance USDT - показать баланс конкретной монеты\n"
-        "/help - показать это сообщение"
-    )
-    logger.info("Ответ на /start отправлен")
-
-# Команда /help
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Получена команда /help от пользователя {update.effective_user.id}")
-    
-    if not await is_authorized(update):
-        await update.message.reply_text("❌ У вас нет доступа к этому боту.")
-        return
-    
-    await update.message.reply_text(
-        "📖 Доступные команды:\n\n"
-        "/balance - показать баланс всех монет с ненулевым балансом\n"
-        "/balance USDT - показать баланс указанной монеты\n"
-        "/balance ALL - показать баланс всех монет (включая нулевые)\n"
-        "/help - показать это сообщение"
-    )
-    logger.info("Ответ на /help отправлен")
-
-# Функция получения баланса с Bybit
-async def get_bybit_balance(coin: str = None):
-    logger.info(f"Запрос баланса с Bybit для монеты: {coin if coin else 'все монеты'}")
-    
+# Функция для подключения к Bybit testnet
+def get_bybit_balance():
+    """Получение баланса с Bybit testnet"""
     try:
-        # Получение информации об аккаунте
-        logger.debug("Отправка запроса wallet/get_balance...")
-        response = session.get_wallet_balance(accountType="UNIFIED")
-        logger.debug(f"Ответ от Bybit: {response}")
+        logger.info("🔄 Подключение к Bybit testnet...")
         
-        if response.get('retCode') != 0:
-            error_msg = response.get('retMsg', 'Неизвестная ошибка')
-            logger.error(f"Ошибка API Bybit: {error_msg}")
-            return None, f"Ошибка API: {error_msg}"
+        exchange = ccxt.bybit({
+            'apiKey': BYBIT_API_KEY,
+            'secret': BYBIT_API_SECRET,
+            'options': {
+                'defaultType': 'spot',
+            },
+            'urls': {
+                'api': {
+                    'public': 'https://api-testnet.bybit.com',
+                    'private': 'https://api-testnet.bybit.com',
+                }
+            },
+            'enableRateLimit': True,
+        })
         
-        # Парсинг баланса
-        balance_data = response.get('result', {}).get('list', [{}])[0]
-        coins = balance_data.get('coin', [])
+        # Устанавливаем тестовую сеть
+        exchange.set_sandbox_mode(True)
         
-        logger.info(f"Получены данные о {len(coins)} монетах")
+        logger.info("✅ Подключение установлено, запрашиваем баланс...")
         
-        if coin:
-            # Поиск конкретной монеты
-            coin_upper = coin.upper()
-            for coin_data in coins:
-                if coin_data.get('coin') == coin_upper:
-                    wallet_balance = coin_data.get('walletBalance', '0')
-                    available_balance = coin_data.get('availableToWithdraw', '0')
-                    logger.info(f"Найден баланс для {coin_upper}: wallet={wallet_balance}, available={available_balance}")
-                    return {
-                        'coin': coin_upper,
-                        'wallet_balance': wallet_balance,
-                        'available_balance': available_balance
-                    }, None
-            logger.warning(f"Монета {coin_upper} не найдена в балансе")
-            return None, f"Монета {coin_upper} не найдена"
-        else:
-            # Формирование списка всех монет с ненулевым балансом
-            non_zero_coins = []
-            for coin_data in coins:
-                wallet_balance = float(coin_data.get('walletBalance', 0))
-                if wallet_balance > 0:
-                    non_zero_coins.append({
-                        'coin': coin_data.get('coin'),
-                        'wallet_balance': coin_data.get('walletBalance'),
-                        'available_balance': coin_data.get('availableToWithdraw')
-                    })
-            
-            logger.info(f"Найдено {len(non_zero_coins)} монет с ненулевым балансом")
-            return non_zero_coins, None
-            
+        # Получаем баланс
+        balance = exchange.fetch_balance()
+        
+        logger.info("✅ Баланс успешно получен")
+        return balance
+        
+    except ccxt.NetworkError as e:
+        logger.error(f"🌐 Сетевая ошибка Bybit: {e}")
+        return None
+    except ccxt.AuthenticationError as e:
+        logger.error(f"🔑 Ошибка авторизации Bybit: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Исключение при получении баланса: {e}", exc_info=True)
-        return None, f"Ошибка подключения: {str(e)}"
+        logger.error(f"❌ Неизвестная ошибка Bybit: {e}", exc_info=True)
+        return None
 
-# Команда /balance
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Получена команда /balance от пользователя {update.effective_user.id}")
-    
-    if not await is_authorized(update):
-        await update.message.reply_text("❌ У вас нет доступа к этому боту.")
-        return
-    
-    # Отправка сообщения о начале обработки
-    status_msg = await update.message.reply_text("🔄 Запрос баланса с Bybit Testnet...")
-    
-    # Получение аргументов команды
-    args = context.args
-    coin = args[0] if args else None
-    
+# Обработчик команды /start
+def start(update: Update, context: CallbackContext):
+    """Обработчик команды /start"""
     try:
-        balance_data, error = await get_bybit_balance(coin)
+        logger.info(f"📱 Команда /start от пользователя @{update.effective_user.username}")
         
-        if error:
-            await status_msg.edit_text(f"❌ Ошибка: {error}")
+        # Проверка авторизации
+        if not is_authorized(update):
+            update.message.reply_text("⛔ У вас нет доступа к этому боту!")
             return
         
-        if coin:
-            # Отображение баланса конкретной монеты
-            message = f"💰 Баланс на Bybit Testnet:\n\n"
-            message += f"Монета: {balance_data['coin']}\n"
-            message += f"Баланс кошелька: {balance_data['wallet_balance']}\n"
-            message += f"Доступно для вывода: {balance_data['available_balance']}\n"
-            message += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            
-            await status_msg.edit_text(message)
-            logger.info(f"Баланс для {coin} отправлен пользователю")
-            
-        else:
-            # Отображение всех монет
-            if not balance_data:
-                await status_msg.edit_text("💰 Баланс на Bybit Testnet:\n\nНет монет с ненулевым балансом")
-                logger.info("Нулевой баланс отправлен пользователю")
-                return
-            
-            message = "💰 Баланс на Bybit Testnet:\n\n"
-            for coin_data in balance_data:
-                message += f"• {coin_data['coin']}:\n"
-                message += f"  Баланс: {coin_data['wallet_balance']}\n"
-                message += f"  Доступно: {coin_data['available_balance']}\n\n"
-            
-            message += f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            
-            await status_msg.edit_text(message)
-            logger.info(f"Баланс {len(balance_data)} монет отправлен пользователю")
-            
-    except Exception as e:
-        logger.error(f"Ошибка в команде balance: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Произошла ошибка: {str(e)}")
+        welcome_text = f"""
+🤖 <b>Бот Bybit Testnet</b>
+📦 <b>Версия:</b> {BOT_VERSION}
+✅ <b>Статус:</b> Активен
+🔗 <b>Биржа:</b> Bybit Testnet
+👤 <b>Авторизован:</b> {AUTHORIZED_USER}
 
-# Обработка ошибок
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Произошла ошибка: {context.error}", exc_info=True)
-    
+🔄 Используйте команду /balance для получения баланса
+ℹ️ Команда /version - показать версию бота
+        """
+        
+        update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
+        logger.info(f"✅ Отправлено приветствие для @{update.effective_user.username}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в /start: {e}", exc_info=True)
+        update.message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
+
+# Обработчик команды /balance
+def balance(update: Update, context: CallbackContext):
+    """Обработчик команды /balance - показывает баланс"""
     try:
-        if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ Произошла техническая ошибка. Администратор уведомлен."
-            )
-    except:
-        pass
+        logger.info(f"💰 Команда /balance от пользователя @{update.effective_user.username}")
+        
+        # Проверка авторизации
+        if not is_authorized(update):
+            update.message.reply_text("⛔ У вас нет доступа к этому боту!")
+            return
+        
+        update.message.reply_text("🔄 Получение баланса с Bybit Testnet...")
+        
+        # Получаем баланс
+        balance_data = get_bybit_balance()
+        
+        if balance_data is None:
+            update.message.reply_text("❌ Не удалось получить баланс. Проверьте логи.")
+            return
+        
+        # Фильтруем монеты с ненулевым балансом
+        non_zero_balances = {}
+        total_usdt = 0
+        
+        for currency, data in balance_data['total'].items():
+            if data > 0 and currency != 'USDT':
+                non_zero_balances[currency] = data
+        
+        # Добавляем USDT отдельно
+        usdt_balance = balance_data['total'].get('USDT', 0)
+        if usdt_balance > 0:
+            non_zero_balances['USDT'] = usdt_balance
+        
+        # Формируем ответ
+        if not non_zero_balances:
+            balance_text = "💼 <b>Ваш баланс:</b>\n\nПусто (нет монет с ненулевым балансом)"
+        else:
+            balance_lines = ["💼 <b>Ваш баланс на Bybit Testnet:</b>\n"]
+            for currency, amount in non_zero_balances.items():
+                balance_lines.append(f"• <b>{currency}:</b> {amount:.8f}")
+                if currency == 'USDT':
+                    total_usdt += amount
+            
+            if usdt_balance > 0:
+                balance_lines.append(f"\n💰 <b>Общий баланс:</b> {total_usdt:.2f} USDT")
+            
+            balance_text = "\n".join(balance_lines)
+        
+        # Добавляем информацию о версии бота
+        balance_text += f"\n\n📦 <b>Версия бота:</b> {BOT_VERSION}"
+        balance_text += f"\n🕐 <b>Время запроса:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        update.message.reply_text(balance_text, parse_mode=ParseMode.HTML)
+        logger.info(f"✅ Баланс отправлен для @{update.effective_user.username}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в /balance: {e}", exc_info=True)
+        update.message.reply_text("⚠️ Произошла ошибка при получении баланса. Проверьте логи.")
+
+# Обработчик команды /version
+def version(update: Update, context: CallbackContext):
+    """Показать версию бота"""
+    try:
+        logger.info(f"ℹ️ Команда /version от @{update.effective_user.username}")
+        
+        if not is_authorized(update):
+            update.message.reply_text("⛔ У вас нет доступа к этому боту!")
+            return
+        
+        version_text = f"""
+📦 <b>Информация о боте:</b>
+
+• <b>Версия:</b> {BOT_VERSION}
+• <b>Биржа:</b> Bybit Testnet
+• <b>Автор:</b> {AUTHORIZED_USER}
+• <b>Статус:</b> ✅ Работает
+• <b>Последнее обновление:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Для обновления версии измените BOT_VERSION в коде.
+        """
+        
+        update.message.reply_text(version_text, parse_mode=ParseMode.HTML)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в /version: {e}", exc_info=True)
+        update.message.reply_text("⚠️ Ошибка получения версии")
+
+# Обработчик неизвестных команд
+def unknown(update: Update, context: CallbackContext):
+    """Ответ на неизвестные команды"""
+    logger.info(f"❓ Неизвестная команда от @{update.effective_user.username}: {update.message.text}")
+    update.message.reply_text("❓ Неизвестная команда. Используйте /start, /balance или /version")
 
 def main():
-    """Запуск бота"""
-    logger.info("🚀 Запуск Telegram бота...")
-    logger.info(f"Авторизованный пользователь: {AUTHORIZED_USER}")
-    logger.info(f"Bybit API Key (первые 10 символов): {BYBIT_API_KEY_DEMO[:10]}...")
+    """Главная функция запуска бота"""
+    logger.info(f"🚀 Запуск бота версии {BOT_VERSION}")
+    logger.info(f"🤖 Авторизованный пользователь: {AUTHORIZED_USER}")
+    logger.info(f"🔗 Bybit Testnet API ключ: {BYBIT_API_KEY[:10]}...")
     
-    try:
-        # Создание приложения
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        
-        # Добавление обработчиков команд
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("balance", balance))
-        
-        # Добавление обработчика ошибок
-        application.add_error_handler(error_handler)
-        
-        logger.info("✅ Бот успешно настроен и готов к работе")
-        
-        # Запуск бота
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-        
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка при запуске бота: {e}", exc_info=True)
+    # Создаем Updater и передаем ему токен бота
+    updater = Updater(token=TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+    
+    # Регистрируем обработчики команд
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("balance", balance))
+    dispatcher.add_handler(CommandHandler("version", version))
+    dispatcher.add_handler(CommandHandler("help", start))
+    
+    # Обработчик неизвестных команд
+    dispatcher.add_handler(CommandHandler("unknown", unknown))
+    
+    # Запускаем бота
+    updater.start_polling()
+    logger.info("✅ Бот успешно запущен и готов к работе!")
+    
+    # Останавливаем бота при нажатии Ctrl+C
+    updater.idle()
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("👋 Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"💥 Критическая ошибка: {e}", exc_info=True)
