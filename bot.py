@@ -12,7 +12,7 @@ from telegram.ext import Updater, CommandHandler, CallbackContext
 # Загружаем переменные
 load_dotenv()
 
-BOT_VERSION = "1.0.9"
+BOT_VERSION = "1.0.10"
 
 # Настройка логирования
 logging.basicConfig(
@@ -37,16 +37,15 @@ def is_authorized(update: Update) -> bool:
     return user_id == AUTHORIZED_USER or str(update.effective_user.id) == AUTHORIZED_USER.replace('@', '')
 
 def get_bybit_balance():
-    """Получение баланса с Bybit testnet - ИСПРАВЛЕННАЯ ПОДПИСЬ"""
+    """Получение баланса с Bybit testnet"""
     try:
         logger.info("🔄 Запрос баланса...")
         
         timestamp = int(time.time() * 1000)
         
-        # Для GET запроса с параметрами
+        # Параметры запроса
         params = {
-            "accountType": "UNIFIED",
-            "coin": "USDT"
+            "accountType": "UNIFIED"
         }
         
         # Сортируем параметры и создаем строку запроса
@@ -55,7 +54,7 @@ def get_bybit_balance():
         # Строка для подписи
         param_str = f"{timestamp}{BYBIT_API_KEY}{query_string}"
         
-        logger.info(f"Строка для подписи: {param_str}")
+        logger.info(f"Строка для подписи: {param_str[:50]}...")
         
         # Создаем подпись
         signature = hmac.new(
@@ -73,10 +72,8 @@ def get_bybit_balance():
             'Content-Type': 'application/json'
         }
         
-        # Полный URL с параметрами
+        # URL
         url = f"https://api-testnet.bybit.com/v5/account/wallet-balance?{query_string}"
-        
-        logger.info(f"URL: {url}")
         
         response = requests.get(url, headers=headers, timeout=10)
         
@@ -89,10 +86,9 @@ def get_bybit_balance():
                 return data
             else:
                 logger.error(f"API error: {data.get('retMsg')}")
-                logger.error(f"Full response: {data}")
                 return None
         else:
-            logger.error(f"HTTP error: {response.status_code}, {response.text}")
+            logger.error(f"HTTP error: {response.status_code}")
             return None
             
     except Exception as e:
@@ -105,14 +101,12 @@ def format_balance(balance_data):
         if not balance_data or balance_data.get('retCode') != 0:
             return "❌ Не удалось получить баланс. Проверьте API ключи."
         
-        # Парсим ответ
         result = balance_data.get('result', {})
         accounts = result.get('list', [])
         
         if not accounts:
             return "💼 Баланс пуст"
         
-        # Берем первый аккаунт (обычно UNIFIED)
         account = accounts[0]
         coins = account.get('coin', [])
         
@@ -125,14 +119,10 @@ def format_balance(balance_data):
         for coin in coins:
             coin_name = coin.get('coin', '')
             wallet_balance = float(coin.get('walletBalance', 0))
-            equity = float(coin.get('equity', 0))
             
-            if wallet_balance > 0 or equity > 0:
+            if wallet_balance > 0:
                 has_balance = True
-                text += f"• <b>{coin_name}:</b>\n"
-                text += f"  Кошелек: {wallet_balance:.8f}\n"
-                if equity != wallet_balance:
-                    text += f"  Эквити: {equity:.8f}\n"
+                text += f"• <b>{coin_name}:</b> {wallet_balance:.8f}\n"
         
         if not has_balance:
             text = "💼 Нет монет с ненулевым балансом"
@@ -140,16 +130,17 @@ def format_balance(balance_data):
         return text
         
     except Exception as e:
-        logger.error(f"Format error: {e}", exc_info=True)
+        logger.error(f"Format error: {e}")
         return "❌ Ошибка форматирования баланса"
 
 def start(update: Update, context: CallbackContext):
     """Команда /start"""
-    if not is_authorized(update):
-        update.message.reply_text("⛔ У вас нет доступа!")
-        return
-    
-    text = f"""
+    try:
+        if not is_authorized(update):
+            update.message.reply_text("⛔ У вас нет доступа!")
+            return
+        
+        text = f"""
 🤖 <b>Бот Bybit Testnet</b>
 📦 <b>Версия:</b> {BOT_VERSION}
 ✅ <b>Статус:</b> Активен
@@ -158,48 +149,62 @@ def start(update: Update, context: CallbackContext):
 <b>Доступные команды:</b>
 /balance - показать баланс
 /version - версия бота
-    """
-    update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        """
+        update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        logger.info(f"✅ Приветствие отправлено {update.effective_user.username}")
+    except Exception as e:
+        logger.error(f"Ошибка /start: {e}")
 
 def balance(update: Update, context: CallbackContext):
     """Команда /balance"""
-    if not is_authorized(update):
-        update.message.reply_text("⛔ Нет доступа!")
-        return
-    
-    update.message.reply_text("🔄 Получение баланса...")
-    
-    data = get_bybit_balance()
-    text = format_balance(data)
-    
-    text += f"\n\n📦 <b>Версия:</b> {BOT_VERSION}"
-    text += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    
-    update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    try:
+        if not is_authorized(update):
+            update.message.reply_text("⛔ Нет доступа!")
+            return
+        
+        update.message.reply_text("🔄 Получение баланса...")
+        
+        data = get_bybit_balance()
+        text = format_balance(data)
+        
+        text += f"\n\n📦 <b>Версия:</b> {BOT_VERSION}"
+        text += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        logger.info(f"✅ Баланс отправлен {update.effective_user.username}")
+    except Exception as e:
+        logger.error(f"Ошибка /balance: {e}")
+        update.message.reply_text("⚠️ Ошибка получения баланса")
 
 def version(update: Update, context: CallbackContext):
     """Команда /version"""
-    if not is_authorized(update):
-        update.message.reply_text("⛔ Нет доступа!")
-        return
-    
-    text = f"""
+    try:
+        if not is_authorized(update):
+            update.message.reply_text("⛔ Нет доступа!")
+            return
+        
+        text = f"""
 📦 <b>Версия бота:</b> {BOT_VERSION}
 ✅ <b>Статус:</b> Работает
 👤 <b>Автор:</b> {AUTHORIZED_USER}
 🕐 <b>Время:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    """
-    update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        """
+        update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        logger.info(f"✅ Версия отправлена {update.effective_user.username}")
+    except Exception as e:
+        logger.error(f"Ошибка /version: {e}")
 
 def main():
     """Запуск бота"""
     logger.info(f"🚀 Запуск бота v{BOT_VERSION}")
     logger.info(f"👤 Авторизован: {AUTHORIZED_USER}")
+    logger.info(f"🔑 API Key: {BYBIT_API_KEY[:10]}...")
     
     # Принудительно удаляем webhook
     try:
         response = requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
         logger.info(f"Webhook удален: {response.json()}")
+        time.sleep(1)
     except Exception as e:
         logger.error(f"Ошибка удаления webhook: {e}")
     
@@ -211,9 +216,10 @@ def main():
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CommandHandler("balance", balance))
     dispatcher.add_handler(CommandHandler("version", version))
+    dispatcher.add_handler(CommandHandler("help", start))
     
-    # Запускаем polling
-    updater.start_polling(clean=True, drop_pending_updates=True)
+    # Запускаем polling - используем только clean=True
+    updater.start_polling(clean=True)
     logger.info("✅ Бот запущен и готов к работе!")
     
     # Останавливаем бота при сигнале
