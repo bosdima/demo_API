@@ -1,16 +1,4 @@
-# Основные зависимости для бота
-python-telegram-bot>=20.7
-python-dotenv>=1.0.0
-pytz>=2023.3
-colorama>=0.4.6
-
-# ВАЖНО: используем старую стабильную версию pybit (v3 API)
-pybit==4.1.0
-
-# Для асинхронности
-anyio>=4.0.0
-httpx>=0.25.0
-httpcore>=1.0.0
-
-# Для проверки ключей
-requests>=2.31.0
+aiogram==3.3.0
+python-dotenv==1.0.0
+ccxt==4.2.18
+asyncio==3.4.3
